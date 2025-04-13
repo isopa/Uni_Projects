@@ -1,0 +1,428 @@
+```{r Initial Values, include = FALSE}
+### Initial Values (do not touch) ###
+rm(list = ls())
+
+Daily <- 1
+Weekly <- 2
+Fortnightly <- 3
+Monthly <- 4
+Quarterly <- 5
+Semi_Annually <- 6
+Annually <- 7
+
+### PACKAGES ###
+
+list.of.packages <- c("ggplot", "dplyr", "cowplot")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+library('ggplot2')
+library('dplyr')
+library('cowplot')
+knitr::opts_chunk$set(fig.height = 6)
+```
+
+# Adjust options/settings for calculator here
+```{r Options}
+Number_Of_Simulations_Mortgage <- 1000
+Number_Of_Simulations_HomePrice <- 1000
+
+MAKE_PLOTS <- TRUE
+NUM_PLOTS <- 6 # Number of plots you want to print
+
+## Question 1/2/3 ##
+Payment_Interval <- Monthly             # Payment interval / CIR process interval
+Loan_Term <- 30                         # In Years
+Initial_Price <- 1260000                # In Dollars
+Remaining_Loan <- Initial_Price * 0.8   # Initialised to original loan amount
+Rate_Floor <- 0.025                     # Per annum rate convertible monthly, i^(12)
+Rate_Ceil <- 0.075                      #                   |
+
+## Question 4 ##
+Growth_Interval <- Fortnightly      # Housing CIR process interval
+Withdrawal_Interval <- Fortnightly  # Withdrawal interval
+Initial_Withdrawal <- 2500          # In Dollars
+Annual_Increase <- 100              #     |
+Max_Age <- 95                       # In Years
+Retirement_Age <- 67                #     |
+Initial_Age <- 30                   #     |
+Equity_Ceiling <- 0.3               # 30%
+HEAS_Rate <- 0.0395                 # 3.95% p.a. convertible to withdrawal interval
+```
+
+# Implementations of dr, dS, dv, dW
+```{r Functions}
+dW <- function(delta_n) {
+    return(sqrt(delta_n) * rnorm(1, mean = 0, sd = 1))
+}
+
+StepMortgageRate <- function(r_n, k_r, theta_r, delta_n, sigma_r, Rate_Floor, Rate_Ceil) {
+    return(
+        r_n + k_r * (theta_r - r_n)*delta_n + sigma_r*sqrt(r_n)*dW(delta_n)
+    )
+}
+
+StepHousePrice <- function(S_t, mu, v_t1, delta_n) {
+    return (
+        S_t + mu*S_t*delta_n + sqrt(v_t1)*S_t*dW(delta_n)
+    )
+}
+
+StepVariance <- function(v_n, k_v, theta_v, rho, sigma_v, delta_n) {
+    return(
+        v_n + k_v*(theta_v-v_n)*delta_n + rho*sigma_v*sqrt(v_n)*dW(delta_n) + sigma_v*sqrt(1-rho^2)*sqrt(v_n)*dW(delta_n)
+    )
+}
+
+SimulateMortgage <- function(periods, r_0, k_r, theta_r, sigma_r, delta_n, Rate_Floor, Rate_Ceil) {
+    rates <- c(r_0)
+    for (i in 2:periods) {
+        rates[i] <- StepMortgageRate(rates[i-1], k_r, theta_r, delta_n, sigma_r, Rate_Floor, Rate_Ceil)
+    }
+    
+    return(rates)
+}
+
+SimulateHousing <- function(periods, v_0, k_v, theta_v, sigma_v, rho, Initial_Price, mu, delta_n) {
+    house_prices <- c(Initial_Price)
+    variance <- v_0
+    
+    for(i in 2:periods) {
+        variance <- StepVariance(variance, k_v, theta_v, rho, sigma_v, delta_n)
+        house_prices[i] <- StepHousePrice(house_prices[i-1], mu, variance, delta_n)
+    }
+    
+    return(house_prices)
+}
+
+AnnuityPayment <- function(i, n, PV) {
+    k <- (1 - (1+i)^(-n))/i
+    return(
+        PV/k
+    )
+}
+```
+
+```{r, echo = FALSE}
+## Variables given from the assignment document
+delta_n <- c(1/365, 1/52, 1/26, 1/12, 1/4, 1/2, 1)
+num_periods <- 1/delta_n
+interval_names <-  c('Daily', 'Weekly', 'Fortnightly', 'Monthly', 'Quarterly', 'Semi-Annually', 'Annually')
+
+np <- num_periods[Payment_Interval] # number of periods for a given payment interval
+HEAS_Rate <- HEAS_Rate/num_periods[Withdrawal_Interval]
+
+# Converting rate floor and ceiling to nominal annual convertible to PAYMENT PERIOD
+# e.g. Original rate floor is r^(12), we convert that to r^(4) if payment period is 
+#      quarterly, and num_periods = 4.
+Rate_Floor <- ((1 + Rate_Floor/12)^(12/np) - 1) * np
+Rate_Ceil <- ((1 + Rate_Ceil/12)^(12/np) - 1) * np
+rho <- -0.5
+
+## Investment return process (mortgage rates) ##
+IRP <- data.frame(
+    theta_r = c(0.02956, 0.029567, 0.029576, 0.029595, 0.029668, 0.029778, 0.03),
+    r_0 = c(0.059594, 0.059623, 0.059657, 0.059737, 0.060035, 0.060485, 0.0614),
+    k_r = c(0.40569, 0.40705, 0.408643, 0.412392998, 0.426727679, 0.449489743, 0.5),
+    sigma_r = c(0.02956, 0.029567, 0.029576, 0.029595, 0.029668, 0.029778, 0.02)
+)
+
+mean_rate <- IRP$theta_r[Payment_Interval]
+
+## House price and Variance process ##
+HVP <- data.frame(
+    mu = c(0.095322625, 0.09539758, 0.095485086, 0.095689685, 0.096454756, 0.097617696, 0.1),
+    theta_v = c(0.041144262, 0.041158223, 0.041174512, 0.041212551, 0.041354253, 0.041568025, 0.042),
+    v_0 = c(0.03922282, 0.039235508, 0.03925031, 0.039284877, 0.039413626, 0.039607805, 0.04),
+    k_v = c(0.4056904, 0.407050013, 0.408643183, 0.412392998, 0.426727679, 0.449489743, 0.5),
+    sigma_v = c(0.019803164, 0.019806398, 0.01981017, 0.019818976, 0.019851726, 0.019900988, 0.02)
+)
+
+# The 3 different periods for each section
+payment_periods <- Loan_Term * np
+housing_growth_periods <- (Max_Age - Initial_Age) * num_periods[Growth_Interval]
+withdrawal_periods <- (Max_Age - Retirement_Age) * num_periods[Withdrawal_Interval]
+
+retirement_start_index <- (Retirement_Age - Initial_Age) * num_periods[Growth_Interval]
+amt <- 0 # Current amount withdrawed
+
+## Simulation lists ##
+rates_simulations <- list()
+loan_simulations <- list()
+price_simulations <- list()
+
+## Plot lists ##
+rates_plots_nominal <- list()
+rates_plots_effective <- list()
+rates_plots_monthly_effective <- list()
+
+balance_simulations_plots <- list()
+principal_simulations_plots <- list()
+interest_simulations_plots <- list()
+
+price_simulations_plots <- list()
+
+## Equity withdrawal lists ##
+median_house_price <- c()
+Total_Withdrawal <- c()
+Marginal_Withdrawal <- c()
+Marginal_Withdrawal_FV <- c()
+```
+
+## Q1) Mortgage Rates
+```{r Q1, echo = FALSE}
+for (i in 1:Number_Of_Simulations_Mortgage) {
+    # Simulation returns mortgage rates in nominal annual convertible monthly, i^(12)
+    simulation <- SimulateMortgage(payment_periods, IRP$r_0[Payment_Interval], IRP$k_r[Payment_Interval], 
+                                   IRP$theta_r[Payment_Interval], IRP$sigma_r[Payment_Interval], 
+                                   delta_n[Payment_Interval], Rate_Floor, Rate_Ceil)
+    
+    # Find which indices have rates outside the collar
+    below_floor <- which(simulation < Rate_Floor)
+    above_ceil <- which(simulation > Rate_Ceil)
+    
+    ## Apply rate collar to simulated rates
+    simulation[below_floor] = Rate_Floor
+    simulation[above_ceil] = Rate_Ceil
+    
+    ## Put simulation results into a data frame for plotting
+    rates_df <- data.frame(
+        simulated_rates = simulation,
+        simulated_eff_monthly_rates = (1 + simulation/np)^(np/12) - 1,
+        time = c(1:payment_periods)
+    )
+    
+    if (MAKE_PLOTS && i <= NUM_PLOTS) {
+        p_nom <- ggplot(data = rates_df, aes(x=time, y = simulated_rates)) +
+            geom_line() +
+            geom_hline(yintercept = mean_rate, color = 'red', linetype = 'dashed') +
+            geom_hline(yintercept = Rate_Ceil, color = 'blue', linetype = 'dashed') +
+            geom_hline(yintercept = Rate_Floor, color = 'green', linetype = 'dashed') +
+            labs(x = 'Time', y = 'Simulated Rates', title = paste('Nominal, conv.', interval_names[Payment_Interval])) +
+            theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) + theme_bw()
+        
+        # Effective rates for the payment period, might not he effective monthly
+        p_eff <- ggplot(data = rates_df, aes(x=time, y = simulated_rates/np)) +
+            geom_line() +
+            geom_hline(yintercept = mean_rate/np, color = 'red', linetype = 'dashed') +
+            geom_hline(yintercept = Rate_Ceil/np, color = 'blue', linetype = 'dashed') +
+            geom_hline(yintercept = Rate_Floor/np, color = 'green', linetype = 'dashed') +
+            labs(x = 'Time', y = 'Simulated Rates', title = paste('Effective, ', interval_names[Payment_Interval])) +
+            theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) + theme_bw()
+        
+        # Effective rates for the payment period CONVERTED to effective monthly rates
+        p_meff <- ggplot(data = rates_df, aes(x=time, y = simulated_eff_monthly_rates)) +
+            geom_line() +
+            labs(x = 'Time', y = 'Simulated Rates', title = paste('Effective, Monthly')) +
+            theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) + theme_bw()
+        
+        rates_plots_nominal[[i]] <- p_nom
+        rates_plots_effective[[i]] <- p_eff
+        rates_plots_monthly_effective[[i]] <- p_meff
+    }
+
+    rates_simulations[[i]] <- rates_df
+}
+
+### Calculate median mortgage rate, rates are i^(12) ###
+median_rates <- c()
+for (t in 1:payment_periods) {
+    rates_t <- c()
+    
+    for (k in 1:Number_Of_Simulations_Mortgage) {
+        rates_t[k] <- rates_simulations[[k]]$simulated_rates[t]
+    }
+    
+    median_rates[t] <- median(rates_t)
+}
+
+if (MAKE_PLOTS) {
+    cat("--------------------------------------------------------------------------------")
+    print(plot_grid(plotlist = rates_plots_nominal, ncol = 3))
+    cat("--------------------------------------------------------------------------------")
+    print(plot_grid(plotlist = rates_plots_effective, ncol = 3))
+    cat("--------------------------------------------------------------------------------")
+    print(plot_grid(plotlist = rates_plots_monthly_effective, ncol = 3))
+}
+
+print(rates_plots_nominal[[1]])
+print(rates_plots_effective[[1]])
+print(rates_plots_monthly_effective[[1]])
+
+## Plot median mortgage rate ##
+cat("--------------------------------------------------------------------------------")
+cat("Median mortgage rate over time")
+ggplot() + geom_line(data = data.frame(Time = c(1:payment_periods), Rates = median_rates), color = "pink") + aes(x = Time, y = Rates) +
+    geom_hline(yintercept = mean_rate, linetype = "dashed", color = "gray") +
+    xlab(paste0("Time (", interval_names[Payment_Interval], ")")) +
+    theme_bw()
+
+```
+## Q2/3) Mortgage Payments
+```{r Q2/3, echo = FALSE}
+for (j in 1:length(rates_simulations)) {
+    Remaining_Loan <- Initial_Price * 0.8
+    
+    # Payment values for current mortgage simulation
+    sim <- rates_simulations[[j]]
+    loan_balance <- c()
+    principal_payments <- c()
+    interest_payments <- c()
+    
+    for (k in 1:payment_periods) {
+        # Convert the per annum rate to the effective period rate 
+        interest_rate <- sim$simulated_rates[k]/np
+        
+        # The first 'n' should be payment_periods not payment_periods - 1
+        n <- payment_periods - (k-1)
+        
+        # Find P such that Remaining_Loan = P * a(n,interest)
+        M_t <- AnnuityPayment(i = interest_rate, n = n, PV = Remaining_Loan)
+        
+        interest_payment <- Remaining_Loan * interest_rate # I_t = OB_t * i
+        principal_payment <- M_t - interest_payment # PR_t = M_t - I_t
+        
+        Remaining_Loan <- Remaining_Loan - principal_payment # OB_(t+1) = OB_t - PR_t
+        
+        # Thus loan_balance holds the remaining loan value at interval t AFTER principal payment
+        loan_balance[k] <- Remaining_Loan
+        principal_payments[k] <- principal_payment
+        interest_payments[k] <- interest_payment
+    }
+    
+    loan_df <- data.frame(
+        simulated_balance = loan_balance,
+        simulated_principal_payments = principal_payments,
+        simulated_interest_payments = interest_payments,
+        time = c(1:payment_periods)
+    )
+    
+    loan_simulations[[j]] <- loan_df
+    
+    if(MAKE_PLOTS && j <= NUM_PLOTS) {
+        p_balance <- ggplot(data = loan_df, aes(x=time, y = simulated_balance)) +
+            geom_line() +
+            geom_point(size = 0) +
+            labs(x = 'Time', y = 'Amount', title = paste('OB post-payment, ', interval_names[Payment_Interval])) +
+            theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) + theme_bw()
+        p_principal <- ggplot(data = loan_df, aes(x=time, y = simulated_principal_payments)) +
+            geom_line() +
+            geom_point(size = 0) +
+            labs(x = 'Time', y = 'Amount', title = paste('Principal Payments, ', interval_names[Payment_Interval])) +
+            theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) + theme_bw()
+        p_interest <- ggplot(data = loan_df, aes(x=time, y = simulated_interest_payments)) +
+            geom_line() +
+            geom_point(size = 0) +
+            labs(x = 'Time', y = 'Amount', title = paste('Interest Payments, ', interval_names[Payment_Interval])) +
+            theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) + theme_bw()
+        
+        balance_simulations_plots[[j]] <- p_balance
+        principal_simulations_plots[[j]] <- p_principal
+        interest_simulations_plots[[j]] <- p_interest
+    }
+}
+
+print(balance_simulations_plots[[1]])
+print(principal_simulations_plots[[1]])
+print(interest_simulations_plots[[1]])
+
+# Plot relevant graphs of values
+if (MAKE_PLOTS) {
+    cat("--------------------------------------------------------------------------------")
+    print(plot_grid(plotlist = balance_simulations_plots, ncol = 2))
+    cat("--------------------------------------------------------------------------------")
+    print(plot_grid(plotlist = principal_simulations_plots, ncol = 2))
+    cat("--------------------------------------------------------------------------------")
+    print(plot_grid(plotlist = interest_simulations_plots, ncol = 2))
+}
+```
+## Q4) House Prices
+```{r Q4, echo = FALSE}
+### Price Simulation Portion ###
+# Will give housing prices at the BEGINNING of each period #
+for (i in 1:Number_Of_Simulations_HomePrice) {
+    # SimulateHousing parameters:
+    # num_periods, v_0, k_v, theta_v, sigma_v, rho, Initial_Price, mu, delta_n
+    simulation <- SimulateHousing(housing_growth_periods, 
+                                  HVP$v_0[Growth_Interval],
+                                  HVP$k_v[Growth_Interval],
+                                  HVP$theta_v[Growth_Interval],
+                                  HVP$sigma_v[Growth_Interval],
+                                  rho, 
+                                  Initial_Price, HVP$mu[Growth_Interval],
+                                  delta_n[Growth_Interval])
+    
+    prices_df <- data.frame(
+        simulated_prices = simulation,
+        time = c(1:housing_growth_periods)
+    )
+    
+    price_simulations[[i]] <- prices_df
+    
+    if (MAKE_PLOTS) {
+        p_prices <- ggplot(data = prices_df, aes(x=time, y = simulated_prices)) +
+            geom_line() +
+            geom_point(size = 0) +
+            labs(x = 'Time', y = 'Amount', title = paste('Simulated House Prices, ', interval_names[Growth_Interval])) +
+            theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) + theme_bw()
+        
+        price_simulations_plots[[i]] <- p_prices
+    }
+}
+
+### Housing Equity Access Scheme Portion ###
+# Obtaining the median of 1000 simulations #
+for (t in 1:housing_growth_periods) {
+    prices_t <- c() # Temporary vector to store all simulated prices at time t
+    
+    for (k in 1:Number_Of_Simulations_HomePrice) {
+        prices_t[k] <- price_simulations[[k]]$simulated_price[t]
+    }
+    
+    median_house_price[t] <- median(prices_t)
+}
+
+## Withdrawal simulation ##
+# k is adjustment factor to make sure median_house_price index lines up with withdrawal index
+k <- floor(num_periods[Growth_Interval]/num_periods[Withdrawal_Interval])
+
+for(t in 1:withdrawal_periods) {
+    Marginal_Withdrawal[t] <- Initial_Withdrawal + Annual_Increase * floor((t-1)/num_periods[Withdrawal_Interval])
+    
+    # Compound withdrawal at time t to get the future value at age 95
+    Marginal_Withdrawal_FV[t] <- Marginal_Withdrawal[t] * (1+HEAS_Rate)^(withdrawal_periods-(t-1))
+    amt <- amt + Marginal_Withdrawal[t]
+    
+    # Stop withdrawal if total amt withdrawed > equity ceiling
+    if (amt > Equity_Ceiling * median_house_price[k*t + retirement_start_index]) {
+        break
+    }
+
+    Total_Withdrawal[t] <- amt
+}
+
+# Plot of house price and total withdrawal amount
+ggplot(data = data.frame(Time = c(1:length(median_house_price)), 
+                         Price = median_house_price, 
+                         Cap = Equity_Ceiling * median_house_price,
+                         total_withdrawals = c(rep.int(0, length(median_house_price)-length(Total_Withdrawal)), Total_Withdrawal))) +
+    geom_line(aes(x = Time, y = Price, color = factor("House Price"))) + 
+    geom_line(aes(x = Time, y = total_withdrawals, colour = factor("Total Withdrawals"))) +
+    geom_line(aes(x = Time, y = Cap, colour = factor("Equity Cap"))) +
+    scale_color_manual(name = "Legend", values = c("black", "red", "blue")) +
+    xlab(paste0("Time (", interval_names[Growth_Interval], ")")) +
+    theme_bw()
+
+ggplot() + aes(x = Time, y = Price) + 
+    geom_line(data = data.frame(Time = c(1:length(Marginal_Withdrawal)), Price = Marginal_Withdrawal), color = "red") +
+    xlab(paste0("Time (", interval_names[Withdrawal_Interval], ")")) +
+    theme_bw()
+```
+# Q5) Excess paid
+```{r Q6, echo = FALSE}
+Expected_Sell_Price <- median_house_price[length(median_house_price)]
+Outstanding_Balance <- sum(Marginal_Withdrawal_FV)
+Remaining_Equity <- Expected_Sell_Price - Outstanding_Balance
+cat("Expected House Price:", prettyNum(Expected_Sell_Price, big.mark = ","))
+cat("Outstanding Withdrawal Balance:", prettyNum(Outstanding_Balance, big.mark = ","))
+cat("Excess paid to beneficiaries:", prettyNum(Remaining_Equity, big.mark = ","))
+```
